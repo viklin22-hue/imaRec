@@ -44,10 +44,10 @@ import site.webbing.audiorec.segment.StepSensorProvider
  *
  * 通知刷新策略：
  * - 状态变化时立即重建一次（更新按钮文案/颜色/点击意图）。
- * - 此外每 10 分钟周期性 notify() 一次，重新参与系统通知排序计算，
+ * - 此外每 2 分钟周期性 notify() 一次，重新参与系统通知排序计算，
  *   在其他媒体 APP（音乐软件等）退出或锁屏控件被挤下后让本 APP 控件重新回到锁屏可见位置。
  *   依赖 [setOnlyAlertOnce]，周期性刷新不会响铃/震动，用户无感知。
- *   间隔取 10 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低。
+ *   间隔取 2 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低。
  *   周期性刷新需要 WakeLock 保证设备休眠时协程仍能执行；WakeLock 生命周期与刷新协程绑定。
  */
 class RecordingService : Service() {
@@ -58,7 +58,7 @@ class RecordingService : Service() {
 
     private var mediaSession: MediaSessionCompat? = null
 
-    // 锁屏控件周期性刷新协程（每 10 分钟 notify 一次，重新参与系统通知排序）。
+    // 锁屏控件周期性刷新协程（每 2 分钟 notify 一次，重新参与系统通知排序）。
     // 仅在 Recording / Paused / Monitoring 态运行；回到 Idle 时由 stopForegroundSafely 取消。
     private var lockscreenRefreshJob: Job? = null
 
@@ -253,9 +253,11 @@ class RecordingService : Service() {
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "imaRec:lockscreen_refresh",
             ).apply { setReferenceCounted(false) }
-            // 单次 acquire 上限 15 分钟，略大于 10 分钟刷新间隔，
-            // 防止协程异常退出时 WakeLock 永久泄漏。
-            wakeLock.acquire(15 * 60 * 1000L)
+            // 4 小时上限兜底，与录音引擎 WakeLock（SegmentController.acquireWakeLock）一致：
+            // - 正常录音会话最长 2 小时（commit 2b492f0），4 小时 = 2 倍上限，正常使用永不误触发
+            // - 异常路径下 releaseWakeLock 未被调用时，4 小时后 OS 自动释放，防止永久泄漏
+            // 旧的 15 分钟超时只覆盖第一次刷新，之后深度休眠会让 delay() 不可靠，已废弃。
+            wakeLock.acquire(4 * 60 * 60 * 1000L)
             try {
                 while (isActive) {
                     delay(REFRESH_INTERVAL_MS)
@@ -424,10 +426,10 @@ class RecordingService : Service() {
         /** Intent extra：地点备注，随 [ACTION_GEO_TRIGGER_SEGMENT] 传递。 */
         const val EXTRA_GEO_LABEL = "geo_label"
 
-        // 锁屏控件周期性刷新间隔：10 分钟。
-        // 取 10 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低，
+        // 锁屏控件周期性刷新间隔：2 分钟。
+        // 取 2 分钟（而非历史上放弃的 200ms 声波动画），用户点击撞上重建的概率极低，
         // 且依赖 setOnlyAlertOnce 不会响铃/震动，用户无感知。
-        private const val REFRESH_INTERVAL_MS = 10L * 60 * 1000
+        private const val REFRESH_INTERVAL_MS = 2L * 60 * 1000
 
         fun start(context: Context) {
             val intent = Intent(context, RecordingService::class.java).apply {
