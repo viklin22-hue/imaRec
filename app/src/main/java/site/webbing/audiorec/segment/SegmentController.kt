@@ -153,6 +153,20 @@ class SegmentController(
     private var kbSwitchJob: Job? = null
 
     /**
+     * 当前分组倒计时窗口内是否已经点过至少一次。
+     *
+     * 语义：第一下点击 = "就地把当前段分段到当前文件夹"（不切换）；
+     * 从第二下起，每点一次向后循环切换一个文件夹。
+     *
+     * 复位点：
+     * - 倒计时正常到点、执行分段之前（[switchFolder] 内 delay 之后）
+     * - 5 秒窗口被外部事件打断时（[cancelKbSwitchWindow]）
+     *
+     * 窗口内被再次点击时**不复位**，靠它记住"这不是第一下"。
+     */
+    private var kbSwitchPrimed = false
+
+    /**
      * 灵感按钮反馈的清除任务。点击灵感按钮后显示反馈行（当前片段保存到的知识库），
      * 5 秒后由此任务清除。与 [kbSwitchJob] 互斥：灵感点击取消分组倒计时，分组点击取消本任务。
      */
@@ -283,9 +297,7 @@ class SegmentController(
         pauseSelectCount = 1
         phase = Phase.PauseSelecting
         // 选择窗口期间取消分组/灵感反馈，提示行由暂停选择接管
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         onPauseFeedback?.invoke("暂停", "5 秒后暂停")
@@ -327,9 +339,7 @@ class SegmentController(
                 // 暂停时取消采样循环与分组/分段反馈
                 samplingJob?.cancel()
                 samplingJob = null
-                kbSwitchJob?.cancel()
-                kbSwitchJob = null
-                GroupCountdownStore.update(false)
+                cancelKbSwitchWindow()
                 segmentFeedbackJob?.cancel()
                 segmentFeedbackJob = null
                 // 记录暂停态占位文件（recorder 后续可能被分组/灵感释放，用此占位展示通知）
@@ -500,9 +510,7 @@ class SegmentController(
      * 取消分组/分段/暂停可能挂起的任务，避免与本次分段冲突。
      */
     private suspend fun performManualSegment() {
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
@@ -579,9 +587,7 @@ class SegmentController(
         // 取消可能挂起的任务
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         pauseSelectJob?.cancel()
         pauseSelectJob = null
 
@@ -629,9 +635,7 @@ class SegmentController(
         pauseTimerJob?.cancel()
         pauseTimerJob = null
         stopPauseStepCheck()
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         pauseGroupSegmentDone = true
         PauseGroupSegmentStore.update(true)
         // 3. 创建灵感段（startNewSegment 会 publishStatus(Recording)，需在之后覆盖 phase 与状态）
@@ -804,8 +808,17 @@ class SegmentController(
         if (folders.size < 2) return
         val currentId = imaSettings.config.value.currentFolderId
         val currentIndex = folders.indexOfFirst { it.id == currentId }
-        val nextIndex = if (currentIndex < 0) 0 else (currentIndex + 1) % folders.size
-        val next = folders[nextIndex]
+        // 目标索引：
+        // - currentId 不在 Tab 列表里（罕见）：兜底跳到第 0 个 Tab
+        // - 本窗口第一下（!kbSwitchPrimed）：保持当前文件夹，等于"就地分段"
+        // - 本窗口后续每一下：向后循环切换一格
+        val targetIndex = when {
+            currentIndex < 0 -> 0
+            !kbSwitchPrimed -> currentIndex
+            else -> (currentIndex + 1) % folders.size
+        }
+        kbSwitchPrimed = true
+        val next = folders[targetIndex]
         imaSettings.selectFolder(next.id)
 
         Toast.makeText(
@@ -816,6 +829,8 @@ class SegmentController(
         onGroupFeedback?.invoke("当前选中：${next.name}，5 秒后自动分段")
 
         // 重启 5 秒倒计时：到点后清除反馈行并执行分段
+        // 注意：这里是窗口内"再点一次"的重启，不能走 cancelKbSwitchWindow()，
+        // 否则会把 kbSwitchPrimed 一起清掉，导致每次点击都被当成"第一下"。
         kbSwitchJob?.cancel()
         // 分组按钮接管反馈行，取消分段按钮可能挂起的反馈清除任务
         segmentFeedbackJob?.cancel()
@@ -825,6 +840,8 @@ class SegmentController(
         kbSwitchJob = scope.launch {
             try {
                 delay(KB_SWITCH_DELAY_MS)
+                // 本窗口结束：下次点击重新计为"第一下"
+                kbSwitchPrimed = false
                 onGroupFeedback?.invoke(null)
                 GroupCountdownStore.update(false)
                 // 倒计时期间状态可能变化（停止会取消本协程，这里只是防御性检查）
@@ -845,6 +862,22 @@ class SegmentController(
                 throw e
             }
         }
+    }
+
+    /**
+     * 外部事件打断分组倒计时窗口时统一走此入口。
+     *
+     * 除了取消 [kbSwitchJob] 与清 [GroupCountdownStore]，还会把 [kbSwitchPrimed] 复位，
+     * 使下一次分组按钮点击重新被视为"本窗口第一下"（就地分段，不切换文件夹）。
+     *
+     * **不要**在 [switchFolder] 内部（窗口内再次点击）调用此方法，否则
+     * [kbSwitchPrimed] 会被清掉，导致每次点击都被当成第一下、永远不切换。
+     */
+    private fun cancelKbSwitchWindow() {
+        kbSwitchJob?.cancel()
+        kbSwitchJob = null
+        kbSwitchPrimed = false
+        GroupCountdownStore.update(false)
     }
 
     /**
@@ -936,9 +969,7 @@ class SegmentController(
      * 用于 [forceSegmentByGeoTrigger] 开始前清理状态。
      */
     private fun cancelPendingSegmentJobsForGeo() {
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
@@ -956,9 +987,7 @@ class SegmentController(
         samplingJob = null
         stopTimerJob?.cancel()
         stopTimerJob = null
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
         pauseSelectJob?.cancel()
@@ -1045,9 +1074,7 @@ class SegmentController(
         samplingJob?.cancel()
         samplingJob = null
         // 自动分段进入间隔期时，取消分组按钮可能挂起的 5 秒倒计时，避免与间隔期逻辑冲突
-        kbSwitchJob?.cancel()
-        kbSwitchJob = null
-        GroupCountdownStore.update(false)
+        cancelKbSwitchWindow()
         // 间隔期通知不再使用卡片反馈行，取消分段按钮可能挂起的反馈清除任务
         segmentFeedbackJob?.cancel()
         segmentFeedbackJob = null
