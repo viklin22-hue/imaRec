@@ -1035,12 +1035,14 @@ class SegmentController(
         val geoLabel = pendingGeoLabel
         pendingGeoLabel = ""
         val file = fileManager.createRecordingFile(folderId, geoLabel)
+        val needsTranscript = imaSettings.config.value.uploadMode.needsTranscript
+        val bitRate = if (needsTranscript) TRANSCRIPT_AUDIO_BIT_RATE else AUDIO_ONLY_BIT_RATE
         val recorder = createMediaRecorder().apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             setAudioSamplingRate(44_100)
-            setAudioEncodingBitRate(128_000)
+            setAudioEncodingBitRate(bitRate)
             setOutputFile(file.absolutePath)
         }
         try {
@@ -1142,11 +1144,15 @@ class SegmentController(
                     segmentRecordedMs += (now - lastSampleMs)
                 }
                 lastSampleMs = now
-                // 上传硬性限制：文件大小 ≥ 60MB 或实际录音时长 ≥ 1小时59分时立即分段，
-                // 60MB 远低于 200MB 上传上限，主要目的是降低大文件后台上传的 broken pipe 风险；
-                // 时长仍保留 1 分钟余量以满足 2 小时上传约束
+                // 上传硬性限制：
+                // - 纯音频模式：文件大小 ≥ 60MB 或实际录音时长 ≥ 1小时59分时立即分段；
+                // - 需转写模式（纯文稿 / 音频+文稿）：按主流免费转写接口（≤50MB / ≤60分钟）留足余量，
+                //   文件大小 ≥ 45MB 或实际录音时长 ≥ 55 分钟时自动无缝分段。
+                val needsTranscript = imaSettings.config.value.uploadMode.needsTranscript
+                val maxSizeBytes = if (needsTranscript) MAX_TRANSCRIPT_SEGMENT_SIZE_BYTES else MAX_SEGMENT_SIZE_BYTES
+                val maxDurationMs = if (needsTranscript) MAX_TRANSCRIPT_SEGMENT_DURATION_MS else MAX_SEGMENT_DURATION_MS
                 val fileSize = currentFile?.length() ?: 0L
-                if (fileSize >= MAX_SEGMENT_SIZE_BYTES || segmentRecordedMs >= MAX_SEGMENT_DURATION_MS) {
+                if (fileSize >= maxSizeBytes || segmentRecordedMs >= maxDurationMs) {
                     samplingJob = null
                     scope.launch {
                         finalizeAndUploadCurrent()
@@ -1412,9 +1418,17 @@ class SegmentController(
         private const val PAUSE_STEP_CHECK_INTERVAL_MS = 30_000L
         /** 片段最小上传时长，低于此值的片段保留到本地但不上传。 */
         private const val MIN_SEGMENT_DURATION_MS = 10_000L
+        /** 纯音频模式录音码率（128 kbps）。 */
+        private const val AUDIO_ONLY_BIT_RATE = 128_000
+        /** 需转写模式录音码率（64 kbps），人声清晰且 55 分钟约 26MB，省一半流量并远低于 50MB 转写限制。 */
+        private const val TRANSCRIPT_AUDIO_BIT_RATE = 64_000
         /** 单段文件大小上限（60MB），超过立即分段以降低大文件后台上传的 broken pipe 风险。 */
         private const val MAX_SEGMENT_SIZE_BYTES = 60L * 1024 * 1024
         /** 单段录音时长上限（1小时59分），超过立即分段以符合 2 小时上传限制。 */
         private const val MAX_SEGMENT_DURATION_MS = 119 * 60 * 1000L
+        /** 需转写模式的单段文件大小上限（45MB），为主流转写接口 50MB 上限留出余量。 */
+        private const val MAX_TRANSCRIPT_SEGMENT_SIZE_BYTES = 45L * 1024 * 1024
+        /** 需转写模式的单段录音时长上限（55 分钟），为主流转写接口 60 分钟上限留出余量。 */
+        private const val MAX_TRANSCRIPT_SEGMENT_DURATION_MS = 55 * 60 * 1000L
     }
 }
