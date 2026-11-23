@@ -1147,10 +1147,11 @@ class SegmentController(
                 // 时长仍保留 1 分钟余量以满足 2 小时上传约束
                 val fileSize = currentFile?.length() ?: 0L
                 if (fileSize >= MAX_SEGMENT_SIZE_BYTES || segmentRecordedMs >= MAX_SEGMENT_DURATION_MS) {
-                    samplingJob?.cancel()
                     samplingJob = null
-                    finalizeAndUploadCurrent()
-                    startNewSegment(reason = "超过上传限制")
+                    scope.launch {
+                        finalizeAndUploadCurrent()
+                        startNewSegment(reason = "超过上传限制")
+                    }
                     break
                 }
                 dbWindow1s.add(now, db, 1_000)
@@ -1168,12 +1169,13 @@ class SegmentController(
                     if (inspirationMode) {
                         // 灵感模式下不进入间隔期，直接落盘当前段（归灵感文件夹）+ 开新段继续灵感录音。
                         // 这样用户在灵感期间安静一会儿也不会中断，无需步数变化即可继续。
-                        samplingJob?.cancel()
                         samplingJob = null
-                        finalizeAndUploadCurrent()
-                        startNewSegment(reason = "灵感分段")
-                        // startNewSegment 触发的通知重建会清除反馈行，重新显示灵感提示
-                        onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 ${inspirationFolderName()}")
+                        scope.launch {
+                            finalizeAndUploadCurrent()
+                            startNewSegment(reason = "灵感分段")
+                            // startNewSegment 触发的通知重建会清除反馈行，重新显示灵感提示
+                            onGroupFeedback?.invoke("灵感开始记录，锁屏/再次点击将存入 ${inspirationFolderName()}")
+                        }
                     } else {
                         enterMonitoring(reason = "安静持续")
                     }
