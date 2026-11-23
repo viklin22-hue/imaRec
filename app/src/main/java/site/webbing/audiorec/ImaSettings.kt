@@ -21,6 +21,42 @@ data class FolderOption(
 )
 
 /**
+ * IMA 录音上传模式。
+ */
+enum class ImaUploadMode(
+    val key: String,
+    val label: String,
+    val description: String,
+) {
+    AUDIO_ONLY(
+        key = "audio_only",
+        label = "纯音频模式",
+        description = "仅上传 .m4a 原始录音文件到 IMA（默认行为）。",
+    ),
+    TRANSCRIPT_ONLY(
+        key = "transcript_only",
+        label = "纯文稿模式",
+        description = "录音结束后先转录为文稿，仅以 Markdown 笔记上传到 IMA，便于其他 Agent 直接读取全文。",
+    ),
+    AUDIO_AND_TRANSCRIPT(
+        key = "audio_and_transcript",
+        label = "音频和文稿同时上传",
+        description = "同时上传原始 .m4a 音频和转录后的 Markdown 文稿笔记到同一 IMA 文件夹。",
+    );
+
+    val needsTranscript: Boolean
+        get() = this != AUDIO_ONLY
+
+    val needsAudio: Boolean
+        get() = this != TRANSCRIPT_ONLY
+
+    companion object {
+        fun fromKey(key: String?): ImaUploadMode =
+            entries.firstOrNull { it.key == key } ?: AUDIO_ONLY
+    }
+}
+
+/**
  * IMA 知识库上传配置。
  *
  * 对应 https://ima.qq.com/agent-interface 申请的 OpenAPI 凭证：
@@ -33,6 +69,8 @@ data class FolderOption(
  * - [currentFolderId]：主页当前选中 Tab 的文件夹 ID，双向绑定，上传时作为 folder_id
  * - [inspirationFolderId] / [inspirationFolderName]：灵感记录功能的目标文件夹，
  *   双击锁屏分段按钮进入灵感模式后，灵感期间的录音会保存并上传到此文件夹
+ * - [uploadMode]：上传模式（纯音频 / 纯文稿 / 音频和文稿同时上传）
+ * - [asrEndpoint] / [asrApiKey] / [asrModel]：OpenAI 兼容语音转写接口配置（默认硅基流动免费 SenseVoiceSmall）
  */
 data class ImaConfig(
     val enabled: Boolean = false,
@@ -45,12 +83,27 @@ data class ImaConfig(
     val currentFolderId: String = "",
     val inspirationFolderId: String = "",
     val inspirationFolderName: String = "",
+    val uploadMode: ImaUploadMode = ImaUploadMode.AUDIO_ONLY,
+    val asrEndpoint: String = DEFAULT_ASR_ENDPOINT,
+    val asrApiKey: String = "",
+    val asrModel: String = DEFAULT_ASR_MODEL,
 ) {
     /** 判断配置是否完整，可发起一次上传。 */
     val isConfigured: Boolean
         get() = clientId.isNotBlank() &&
             apiKey.isNotBlank() &&
             knowledgeBaseId.isNotBlank()
+
+    /** 判断语音转写 API 配置是否完整。 */
+    val isAsrConfigured: Boolean
+        get() = asrEndpoint.isNotBlank() &&
+            asrApiKey.isNotBlank() &&
+            asrModel.isNotBlank()
+
+    companion object {
+        const val DEFAULT_ASR_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
+        const val DEFAULT_ASR_MODEL = "FunAudioLLM/SenseVoiceSmall"
+    }
 }
 
 /**
@@ -204,6 +257,12 @@ class ImaSettings private constructor(context: Context) {
         currentFolderId = prefs.getString(KEY_CURRENT_FOLDER, "").orEmpty(),
         inspirationFolderId = prefs.getString(KEY_INSPIRATION_FOLDER_ID, "").orEmpty(),
         inspirationFolderName = prefs.getString(KEY_INSPIRATION_FOLDER_NAME, "").orEmpty(),
+        uploadMode = ImaUploadMode.fromKey(prefs.getString(KEY_UPLOAD_MODE, null)),
+        asrEndpoint = prefs.getString(KEY_ASR_ENDPOINT, null)?.takeIf { it.isNotBlank() }
+            ?: ImaConfig.DEFAULT_ASR_ENDPOINT,
+        asrApiKey = prefs.getString(KEY_ASR_API_KEY, "").orEmpty(),
+        asrModel = prefs.getString(KEY_ASR_MODEL, null)?.takeIf { it.isNotBlank() }
+            ?: ImaConfig.DEFAULT_ASR_MODEL,
     )
 
     private fun save(config: ImaConfig) {
@@ -218,6 +277,10 @@ class ImaSettings private constructor(context: Context) {
             putString(KEY_CURRENT_FOLDER, config.currentFolderId)
             putString(KEY_INSPIRATION_FOLDER_ID, config.inspirationFolderId)
             putString(KEY_INSPIRATION_FOLDER_NAME, config.inspirationFolderName)
+            putString(KEY_UPLOAD_MODE, config.uploadMode.key)
+            putString(KEY_ASR_ENDPOINT, config.asrEndpoint)
+            putString(KEY_ASR_API_KEY, config.asrApiKey)
+            putString(KEY_ASR_MODEL, config.asrModel)
             apply()
         }
     }
@@ -267,5 +330,9 @@ class ImaSettings private constructor(context: Context) {
         private const val KEY_CURRENT_FOLDER = "current_folder_id"
         private const val KEY_INSPIRATION_FOLDER_ID = "inspiration_folder_id"
         private const val KEY_INSPIRATION_FOLDER_NAME = "inspiration_folder_name"
+        private const val KEY_UPLOAD_MODE = "upload_mode"
+        private const val KEY_ASR_ENDPOINT = "asr_endpoint"
+        private const val KEY_ASR_API_KEY = "asr_api_key"
+        private const val KEY_ASR_MODEL = "asr_model"
     }
 }

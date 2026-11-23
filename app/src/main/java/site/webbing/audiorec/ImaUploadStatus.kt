@@ -13,10 +13,11 @@ sealed interface ImaUploadStatus {
     /** 空闲，没有上传任务在进行。 */
     data object Idle : ImaUploadStatus
 
-    /** 正在上传，[fileName] 为录音文件名，[progress] 为 0~1 之间进度（未知时为 0）。 */
+    /** 正在上传，[fileName] 为录音文件名，[progress] 为 0~1 之间进度（未知时为 0），[stage] 为当前阶段提示。 */
     data class Uploading(
         val fileName: String,
         val progress: Float = 0f,
+        val stage: String = "正在上传录音到 IMA 知识库…",
     ) : ImaUploadStatus
 
     /** 上传成功。 */

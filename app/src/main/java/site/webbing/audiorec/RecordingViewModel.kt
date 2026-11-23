@@ -95,13 +95,18 @@ class RecordingViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             imaUploadStateStore.status.collect { status ->
                 when (status) {
-                    is ImaUploadStatus.Uploading -> showMessage("正在上传录音到 IMA 知识库…")
+                    is ImaUploadStatus.Uploading -> showMessage(status.stage)
                     is ImaUploadStatus.Success -> {
-                        val name = imaSettings.config.value.knowledgeBaseName
-                            .ifBlank { "知识库" }
-                        showMessage("录音已上传到「$name」")
+                        val cfg = imaSettings.config.value
+                        val name = cfg.knowledgeBaseName.ifBlank { "知识库" }
+                        val subject = when (cfg.uploadMode) {
+                            ImaUploadMode.AUDIO_ONLY -> "录音"
+                            ImaUploadMode.TRANSCRIPT_ONLY -> "文稿笔记"
+                            ImaUploadMode.AUDIO_AND_TRANSCRIPT -> "音频与文稿笔记"
+                        }
+                        showMessage("${subject}已上传到「$name」")
                     }
-                    is ImaUploadStatus.Failed -> showMessage("录音上传失败：${status.message}")
+                    is ImaUploadStatus.Failed -> showMessage("上传失败：${status.message}")
                     ImaUploadStatus.Idle -> Unit
                 }
             }

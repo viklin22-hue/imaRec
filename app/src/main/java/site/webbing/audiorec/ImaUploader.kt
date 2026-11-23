@@ -94,10 +94,19 @@ class ImaUploader private constructor(
             )
             return
         }
+        if (effectiveConfig.uploadMode.needsTranscript && !effectiveConfig.isAsrConfigured) {
+            ImaUploadStateStore.get(context).set(
+                ImaUploadStatus.Failed(
+                    file.name,
+                    "当前为「${effectiveConfig.uploadMode.label}」，请在设置中填写语音转写 API Key",
+                ),
+            )
+            return
+        }
         // 诊断日志：把实际使用的配置打出来（KB ID / folder ID 用引号包裹并标注长度，
         // 用于暴露首尾空白、不可见字符等常见复制粘贴问题）
         logD(
-            "enqueueUpload start: file=${file.name} size=${file.length()}\n" +
+            "enqueueUpload start: file=${file.name} size=${file.length()} mode=${effectiveConfig.uploadMode.key}\n" +
                 "  clientId=\"${effectiveConfig.clientId}\" (len=${effectiveConfig.clientId.length}, trimmed=${effectiveConfig.clientId.trim().length})\n" +
                 "  apiKey provided=${effectiveConfig.apiKey.isNotBlank()} (len=${effectiveConfig.apiKey.length}, trimmed=${effectiveConfig.apiKey.trim().length})\n" +
                 "  knowledgeBaseId=\"${effectiveConfig.knowledgeBaseId}\" (len=${effectiveConfig.knowledgeBaseId.length}, trimmed=${effectiveConfig.knowledgeBaseId.trim().length})\n" +
@@ -118,6 +127,9 @@ class ImaUploader private constructor(
     private suspend fun uploadInternalSerialized(file: File, config: ImaConfig) {
         try {
             uploadInternal(file, config)
+        } catch (e: TranscriptionException) {
+            logE("upload failed (TranscriptionException): ${e.message}")
+            ImaUploadStateStore.get(context).set(ImaUploadStatus.Failed(file.name, e.message ?: "语音转写失败"))
         } catch (e: ImaException) {
             logE("upload failed (ImaException): ${e.message}")
             ImaUploadStateStore.get(context).set(ImaUploadStatus.Failed(file.name, e.message ?: "上传失败"))
@@ -344,15 +356,55 @@ class ImaUploader private constructor(
         }
 
     private fun uploadInternal(file: File, config: ImaConfig) {
-        ImaUploadStateStore.get(context).set(ImaUploadStatus.Uploading(file.name))
+        val fileName = file.name
+        val stateStore = ImaUploadStateStore.get(context)
 
+        when (config.uploadMode) {
+            ImaUploadMode.AUDIO_ONLY -> {
+                stateStore.set(ImaUploadStatus.Uploading(fileName, stage = "正在上传录音到 IMA 知识库…"))
+                uploadAudioFile(file, config)
+            }
+
+            ImaUploadMode.TRANSCRIPT_ONLY -> {
+                stateStore.set(ImaUploadStatus.Uploading(fileName, stage = "正在将录音转录为文稿…"))
+                val transcript = AudioTranscriber.transcribe(file, config)
+                if (transcript.isBlank()) {
+                    throw ImaException("未识别到有效语音内容，已跳过文稿上传")
+                }
+                stateStore.set(ImaUploadStatus.Uploading(fileName, stage = "正在上传文稿笔记到 IMA…"))
+                val (title, markdown) = buildTranscriptNote(file, transcript, config)
+                createTextNoteOrThrow(title, markdown, config)
+            }
+
+            ImaUploadMode.AUDIO_AND_TRANSCRIPT -> {
+                stateStore.set(ImaUploadStatus.Uploading(fileName, stage = "正在上传录音到 IMA 知识库…"))
+                uploadAudioFile(file, config)
+
+                stateStore.set(ImaUploadStatus.Uploading(fileName, stage = "音频已上传，正在转录为文稿…"))
+                val transcript = AudioTranscriber.transcribe(file, config)
+                if (transcript.isNotBlank()) {
+                    stateStore.set(ImaUploadStatus.Uploading(fileName, stage = "正在上传文稿笔记到 IMA…"))
+                    val (title, markdown) = buildTranscriptNote(file, transcript, config)
+                    createTextNoteOrThrow(title, markdown, config)
+                } else {
+                    logD("AUDIO_AND_TRANSCRIPT: empty transcript for $fileName, audio uploaded and blank note skipped")
+                }
+            }
+        }
+
+        // 用磁盘文件名（fileName）而非 finalName 记录成功状态，
+        // 以便文件列表按 RecordingFile.name 精确匹配到本文件的上传结果。
+        stateStore.set(ImaUploadStatus.Success(fileName))
+    }
+
+    private fun uploadAudioFile(file: File, config: ImaConfig) {
         // 录音文件固定为 m4a（与 RecordingFileManager 生成规则一致）
         val fileName = file.name
         val fileExt = "m4a"
         val contentType = "audio/x-m4a"
         val mediaType = 15
         val fileSize = file.length()
-        logD("uploadInternal: fileName=$fileName fileExt=$fileExt contentType=$contentType mediaType=$mediaType fileSize=$fileSize")
+        logD("uploadAudioFile: fileName=$fileName fileExt=$fileExt contentType=$contentType mediaType=$mediaType fileSize=$fileSize")
 
         // Step 1: check_repeated_names —— 重复时自动追加时间戳，保持两者
         logD("Step 1: check_repeated_names")
@@ -373,10 +425,108 @@ class ImaUploader private constructor(
         logD("Step 4: add_knowledge")
         addKnowledge(mediaId, mediaType, finalName, fileSize, cosCred, config)
         logD("Step 4 done")
+    }
 
-        // 用磁盘文件名（fileName）而非 finalName 记录成功状态，
-        // 以便文件列表按 RecordingFile.name 精确匹配到本文件的上传结果。
-        ImaUploadStateStore.get(context).set(ImaUploadStatus.Success(fileName))
+    /**
+     * 创建 Markdown 笔记并关联到指定知识库文件夹，失败时抛出 [ImaException] 以反馈具体原因。
+     */
+    private fun createTextNoteOrThrow(title: String, content: String, config: ImaConfig) {
+        val folderId = config.currentFolderId
+        val step1Body = JSONObject().apply {
+            put("content_format", 1) // MARKDOWN
+            put("content", content)
+        }
+        val step1Data = postJson("openapi/note/v1/import_doc", step1Body, config)
+        val noteId = step1Data.optString("note_id")
+        if (noteId.isBlank()) {
+            throw ImaException("创建文稿笔记失败：未返回 note_id")
+        }
+
+        val step2Body = JSONObject().apply {
+            put("media_type", 11) // 笔记
+            put("note_info", JSONObject().apply {
+                put("content_id", noteId)
+            })
+            put("title", title)
+            put("knowledge_base_id", config.knowledgeBaseId)
+            if (folderId.isNotBlank()) {
+                put("folder_id", folderId)
+            }
+        }
+        postJson("openapi/wiki/v1/add_knowledge", step2Body, config)
+        logD("createTextNoteOrThrow done: noteId=$noteId title=\"$title\" folderId=\"$folderId\"")
+    }
+
+    /**
+     * 基于录音文件名与转写文本构造规范的 IMA Markdown 笔记标题与正文，
+     * 便于个人检索与其他 Agent 直接读取上下文。
+     */
+    private fun buildTranscriptNote(
+        file: File,
+        transcript: String,
+        config: ImaConfig,
+    ): Pair<String, String> {
+        val stem = file.name.removeSuffix(".m4a")
+        val folderIdx = stem.lastIndexOf("_f")
+        val baseWithoutFolder = if (folderIdx >= 0) stem.substring(0, folderIdx) else stem
+
+        // 尝试解析 REC_yyyyMMdd_HHmmss[_locationLabel]
+        val regex = Regex("^REC_(\\d{4})(\\d{2})(\\d{2})_(\\d{2})(\\d{2})(\\d{2})(?:_(.+))?$")
+        val match = regex.matchEntire(baseWithoutFolder)
+        val shortTime: String
+        val fullTime: String
+        val locationLabel: String
+        if (match != null) {
+            val (y, m, d, hh, mm, ss, loc) = match.destructured
+            shortTime = "$y-$m-$d $hh:$mm"
+            fullTime = "$y-$m-$d $hh:$mm:$ss"
+            locationLabel = loc.trim()
+        } else {
+            val nowDate = Date(file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis())
+            shortTime = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(nowDate)
+            fullTime = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(nowDate)
+            locationLabel = ""
+        }
+
+        val folderName = resolveFolderName(config)
+        val isInspiration = config.inspirationFolderId.isNotBlank() &&
+            config.currentFolderId == config.inspirationFolderId
+        val suffix = if (isInspiration) "灵感文稿" else "录音文稿"
+
+        val titleParts = mutableListOf(shortTime)
+        if (locationLabel.isNotBlank()) {
+            titleParts.add(locationLabel)
+        } else if (folderName.isNotBlank() && !isInspiration) {
+            titleParts.add(folderName)
+        }
+        titleParts.add(suffix)
+        val title = titleParts.joinToString(" ")
+
+        val markdown = buildString {
+            append("# ").append(title).append("\n\n")
+            append("> 录音时间：").append(fullTime).append("\n")
+            if (folderName.isNotBlank()) {
+                append("> 归属分类：").append(folderName).append("\n")
+            }
+            if (locationLabel.isNotBlank()) {
+                append("> 地点备注：").append(locationLabel).append("\n")
+            }
+            append("> 原始文件：").append(file.name).append("\n\n")
+            append(transcript.trim())
+            append("\n")
+        }
+        return title to markdown
+    }
+
+    private fun resolveFolderName(config: ImaConfig): String {
+        val targetId = config.currentFolderId
+        if (targetId.isBlank()) return ""
+        if (targetId == config.inspirationFolderId && config.inspirationFolderName.isNotBlank()) {
+            return config.inspirationFolderName
+        }
+        return config.activeFolders.firstOrNull { it.id == targetId }?.name
+            ?: config.allFolders.firstOrNull { it.id == targetId }?.name
+            ?: ""
     }
 
     // ── Step 1: 重名检查 ──
