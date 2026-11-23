@@ -7,6 +7,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,6 +50,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -84,7 +86,9 @@ import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.GeoLocation
 import site.webbing.audiorec.GeoTriggerConfig
 import site.webbing.audiorec.GeoTriggerSettings
+import site.webbing.audiorec.ImaConfig
 import site.webbing.audiorec.ImaSettings
+import site.webbing.audiorec.ImaUploadMode
 import site.webbing.audiorec.ImaUploader
 import site.webbing.audiorec.LocationTriggerService
 import site.webbing.audiorec.RecordingFile
@@ -219,11 +223,41 @@ fun SettingsScreen(
                     )
                 } else if (config.enabled) {
                     Text(
-                        text = "已开启自动上传：录音结束后将自动上传到「${config.knowledgeBaseName.ifBlank { config.knowledgeBaseId }}」",
+                        text = "已开启自动上传：录音结束后将按「${config.uploadMode.label}」上传到「${config.knowledgeBaseName.ifBlank { config.knowledgeBaseId }}」",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }
+            }
+
+            // ── 卡片 1.5：IMA 上传模式与语音转写 ──
+            SettingsCard(
+                title = "IMA 上传模式与语音转写",
+                description = "选择上传到 IMA 知识库的内容形态。开启文稿模式后，录音将自动按 55 分钟 / 45MB 分段（64kbps 人声码率），转为 Markdown 笔记上传，便于其他 Agent 直接读取全文。",
+            ) {
+                UploadModeSection(
+                    config = config,
+                    onModeSelected = { mode ->
+                        settings.update { it.copy(uploadMode = mode) }
+                    },
+                    onAsrApiKeyChange = { v ->
+                        settings.update { it.copy(asrApiKey = v) }
+                    },
+                    onAsrEndpointChange = { v ->
+                        settings.update { it.copy(asrEndpoint = v) }
+                    },
+                    onAsrModelChange = { v ->
+                        settings.update { it.copy(asrModel = v) }
+                    },
+                    onResetDefaults = {
+                        settings.update {
+                            it.copy(
+                                asrEndpoint = ImaConfig.DEFAULT_ASR_ENDPOINT,
+                                asrModel = ImaConfig.DEFAULT_ASR_MODEL,
+                            )
+                        }
+                    },
+                )
             }
 
             // ── 卡片 2：默认上传文件夹 ──
@@ -1783,4 +1817,120 @@ private fun CalendarCapsuleSection(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/**
+ * IMA 上传模式选择（纯音频 / 纯文稿 / 音频和文稿同时上传）及语音转写 API 配置。
+ */
+@Composable
+private fun UploadModeSection(
+    config: ImaConfig,
+    onModeSelected: (ImaUploadMode) -> Unit,
+    onAsrApiKeyChange: (String) -> Unit,
+    onAsrEndpointChange: (String) -> Unit,
+    onAsrModelChange: (String) -> Unit,
+    onResetDefaults: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        ImaUploadMode.entries.forEach { mode ->
+            val selected = config.uploadMode == mode
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onModeSelected(mode) }
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                RadioButton(
+                    selected = selected,
+                    onClick = { onModeSelected(mode) },
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 4.dp, top = 8.dp),
+                ) {
+                    Text(
+                        text = mode.label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
+                    Text(
+                        text = mode.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (config.uploadMode.needsTranscript) {
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+            var keyVisible by rememberSaveable { mutableStateOf(false) }
+            OutlinedTextField(
+                value = config.asrApiKey,
+                onValueChange = onAsrApiKeyChange,
+                label = { Text("语音转写 API Key") },
+                singleLine = true,
+                visualTransformation = if (keyVisible) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                },
+                trailingIcon = {
+                    IconButton(onClick = { keyVisible = !keyVisible }) {
+                        Icon(
+                            imageVector = if (keyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (keyVisible) "隐藏 API Key" else "显示 API Key",
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            OutlinedTextField(
+                value = config.asrEndpoint,
+                onValueChange = onAsrEndpointChange,
+                label = { Text("转写接口地址（OpenAI 兼容）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            OutlinedTextField(
+                value = config.asrModel,
+                onValueChange = onAsrModelChange,
+                label = { Text("转写模型名") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (config.isAsrConfigured) {
+                        "已配置转写参数，录音结束后将自动转写。"
+                    } else {
+                        "提示：默认已填硅基流动免费模型，请前往 cloud.siliconflow.cn 获取 API Key 填入。"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (config.isAsrConfigured) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onResetDefaults) {
+                    Text("恢复默认")
+                }
+            }
+        }
+    }
 }
