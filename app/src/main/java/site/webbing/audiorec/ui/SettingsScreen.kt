@@ -85,6 +85,7 @@ import site.webbing.audiorec.ExifGpsReader
 import site.webbing.audiorec.FolderOption
 import site.webbing.audiorec.GeoLocation
 import site.webbing.audiorec.GeoTriggerConfig
+import site.webbing.audiorec.AsrEngine
 import site.webbing.audiorec.GeoTriggerSettings
 import site.webbing.audiorec.ImaConfig
 import site.webbing.audiorec.ImaSettings
@@ -240,6 +241,9 @@ fun SettingsScreen(
                     onModeSelected = { mode ->
                         settings.update { it.copy(uploadMode = mode) }
                     },
+                    onAsrEngineSelected = { engine ->
+                        settings.update { it.copy(asrEngine = engine) }
+                    },
                     onAsrApiKeyChange = { v ->
                         settings.update { it.copy(asrApiKey = v) }
                     },
@@ -249,12 +253,30 @@ fun SettingsScreen(
                     onAsrModelChange = { v ->
                         settings.update { it.copy(asrModel = v) }
                     },
+                    onDoubaoAppIdChange = { v ->
+                        settings.update { it.copy(doubaoAppId = v) }
+                    },
+                    onDoubaoAccessTokenChange = { v ->
+                        settings.update { it.copy(doubaoAccessToken = v) }
+                    },
+                    onDoubaoResourceIdChange = { v ->
+                        settings.update { it.copy(doubaoResourceId = v) }
+                    },
+                    onDoubaoWsUrlChange = { v ->
+                        settings.update { it.copy(doubaoWsUrl = v) }
+                    },
                     onResetDefaults = {
                         settings.update {
-                            it.copy(
-                                asrEndpoint = ImaConfig.DEFAULT_ASR_ENDPOINT,
-                                asrModel = ImaConfig.DEFAULT_ASR_MODEL,
-                            )
+                            when (it.asrEngine) {
+                                AsrEngine.SILICONFLOW_ALI -> it.copy(
+                                    asrEndpoint = ImaConfig.DEFAULT_ASR_ENDPOINT,
+                                    asrModel = ImaConfig.DEFAULT_ASR_MODEL,
+                                )
+                                AsrEngine.DOUBAO_SAUC_V2 -> it.copy(
+                                    doubaoWsUrl = ImaConfig.DEFAULT_DOUBAO_WS_URL,
+                                    doubaoResourceId = ImaConfig.DEFAULT_DOUBAO_RESOURCE_ID,
+                                )
+                            }
                         }
                     },
                 )
@@ -1820,15 +1842,20 @@ private fun CalendarCapsuleSection(
 }
 
 /**
- * IMA 上传模式选择（纯音频 / 纯文稿 / 音频和文稿同时上传）及语音转写 API 配置。
+ * IMA 上传模式选择（纯音频 / 纯文稿 / 音频和文稿同时上传）及语音转写引擎配置。
  */
 @Composable
 private fun UploadModeSection(
     config: ImaConfig,
     onModeSelected: (ImaUploadMode) -> Unit,
+    onAsrEngineSelected: (AsrEngine) -> Unit,
     onAsrApiKeyChange: (String) -> Unit,
     onAsrEndpointChange: (String) -> Unit,
     onAsrModelChange: (String) -> Unit,
+    onDoubaoAppIdChange: (String) -> Unit,
+    onDoubaoAccessTokenChange: (String) -> Unit,
+    onDoubaoResourceIdChange: (String) -> Unit,
+    onDoubaoWsUrlChange: (String) -> Unit,
     onResetDefaults: () -> Unit,
 ) {
     Column(
@@ -1870,55 +1897,155 @@ private fun UploadModeSection(
         if (config.uploadMode.needsTranscript) {
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-            var keyVisible by rememberSaveable { mutableStateOf(false) }
-            OutlinedTextField(
-                value = config.asrApiKey,
-                onValueChange = onAsrApiKeyChange,
-                label = { Text("语音转写 API Key") },
-                singleLine = true,
-                visualTransformation = if (keyVisible) {
-                    VisualTransformation.None
-                } else {
-                    PasswordVisualTransformation()
-                },
-                trailingIcon = {
-                    IconButton(onClick = { keyVisible = !keyVisible }) {
-                        Icon(
-                            imageVector = if (keyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                            contentDescription = if (keyVisible) "隐藏 API Key" else "显示 API Key",
+            Text(
+                text = "语音转写引擎",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            AsrEngine.entries.forEach { engine ->
+                val selected = config.asrEngine == engine
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onAsrEngineSelected(engine) }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    RadioButton(
+                        selected = selected,
+                        onClick = { onAsrEngineSelected(engine) },
+                    )
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 4.dp, top = 8.dp),
+                    ) {
+                        Text(
+                            text = engine.label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        )
+                        Text(
+                            text = engine.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            )
+                }
+            }
 
-            OutlinedTextField(
-                value = config.asrEndpoint,
-                onValueChange = onAsrEndpointChange,
-                label = { Text("转写接口地址（OpenAI 兼容）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-            OutlinedTextField(
-                value = config.asrModel,
-                onValueChange = onAsrModelChange,
-                label = { Text("转写模型名") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            when (config.asrEngine) {
+                AsrEngine.SILICONFLOW_ALI -> {
+                    var keyVisible by rememberSaveable { mutableStateOf(false) }
+                    OutlinedTextField(
+                        value = config.asrApiKey,
+                        onValueChange = onAsrApiKeyChange,
+                        label = { Text("语音转写 API Key") },
+                        singleLine = true,
+                        visualTransformation = if (keyVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { keyVisible = !keyVisible }) {
+                                Icon(
+                                    imageVector = if (keyVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (keyVisible) "隐藏 API Key" else "显示 API Key",
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    OutlinedTextField(
+                        value = config.asrEndpoint,
+                        onValueChange = onAsrEndpointChange,
+                        label = { Text("转写接口地址（OpenAI 兼容）") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    OutlinedTextField(
+                        value = config.asrModel,
+                        onValueChange = onAsrModelChange,
+                        label = { Text("转写模型名") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+
+                AsrEngine.DOUBAO_SAUC_V2 -> {
+                    OutlinedTextField(
+                        value = config.doubaoAppId,
+                        onValueChange = onDoubaoAppIdChange,
+                        label = { Text("APP ID (X-Api-App-Key)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    var tokenVisible by rememberSaveable { mutableStateOf(false) }
+                    OutlinedTextField(
+                        value = config.doubaoAccessToken,
+                        onValueChange = onDoubaoAccessTokenChange,
+                        label = { Text("Access Token (X-Api-Access-Key)") },
+                        singleLine = true,
+                        visualTransformation = if (tokenVisible) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
+                        trailingIcon = {
+                            IconButton(onClick = { tokenVisible = !tokenVisible }) {
+                                Icon(
+                                    imageVector = if (tokenVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (tokenVisible) "隐藏 Access Token" else "显示 Access Token",
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    OutlinedTextField(
+                        value = config.doubaoResourceId,
+                        onValueChange = onDoubaoResourceIdChange,
+                        label = { Text("资源 ID (X-Api-Resource-Id)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    OutlinedTextField(
+                        value = config.doubaoWsUrl,
+                        onValueChange = onDoubaoWsUrlChange,
+                        label = { Text("WSS 接口地址") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = if (config.isAsrConfigured) {
-                        "已配置转写参数，录音结束后将自动转写。"
+                val hintText = when (config.asrEngine) {
+                    AsrEngine.SILICONFLOW_ALI -> if (config.isAsrConfigured) {
+                        "已配置阿里模型转写参数，录音结束后将自动转写。"
                     } else {
                         "提示：默认已填硅基流动免费模型，请前往 cloud.siliconflow.cn 获取 API Key 填入。"
-                    },
+                    }
+                    AsrEngine.DOUBAO_SAUC_V2 -> if (config.isAsrConfigured) {
+                        "已启用方言自动识别、说话人分离与语义顺滑，本地解 PCM 直连 WSS（不走对象存储）。"
+                    } else {
+                        "提示：请填写火山引擎控制台获取的 APP ID 与 Access Token；已默认启用方言识别、说话人分离与语义顺滑。"
+                    }
+                }
+                Text(
+                    text = hintText,
                     style = MaterialTheme.typography.bodySmall,
                     color = if (config.isAsrConfigured) {
                         MaterialTheme.colorScheme.primary
