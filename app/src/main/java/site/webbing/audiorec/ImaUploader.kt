@@ -95,10 +95,16 @@ class ImaUploader private constructor(
             return
         }
         if (effectiveConfig.uploadMode.needsTranscript && !effectiveConfig.isAsrConfigured) {
+            val missingTip = when (effectiveConfig.asrEngine) {
+                AsrEngine.SILICONFLOW_ALI ->
+                    "当前为「${effectiveConfig.uploadMode.label}」，请在设置中填写语音转写 API Key"
+                AsrEngine.DOUBAO_SAUC_V2 ->
+                    "当前为「${effectiveConfig.uploadMode.label}」，请在设置中填写豆包 APP ID 和 Access Token"
+            }
             ImaUploadStateStore.get(context).set(
                 ImaUploadStatus.Failed(
                     file.name,
-                    "当前为「${effectiveConfig.uploadMode.label}」，请在设置中填写语音转写 API Key",
+                    missingTip,
                 ),
             )
             return
@@ -511,6 +517,7 @@ class ImaUploader private constructor(
             if (locationLabel.isNotBlank()) {
                 append("> 地点备注：").append(locationLabel).append("\n")
             }
+            append("> 转写引擎：").append(config.asrEngine.label).append("\n")
             append("> 原始文件：").append(file.name).append("\n\n")
             append(transcript.trim())
             append("\n")

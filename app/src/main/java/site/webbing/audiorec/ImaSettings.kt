@@ -57,6 +57,31 @@ enum class ImaUploadMode(
 }
 
 /**
+ * 语音转写引擎。
+ */
+enum class AsrEngine(
+    val key: String,
+    val label: String,
+    val description: String,
+) {
+    SILICONFLOW_ALI(
+        key = "siliconflow_ali",
+        label = "阿里模型（OpenAI 兼容）",
+        description = "使用硅基流动等 OpenAI 兼容接口（默认 FunAudioLLM/SenseVoiceSmall），整文件 HTTP 上传转写。",
+    ),
+    DOUBAO_SAUC_V2(
+        key = "doubao_sauc_v2",
+        label = "豆包流式语音识别 2.0",
+        description = "本地 MediaCodec 流式解码 PCM 直连火山引擎 WSS（不走对象存储），支持方言、说话人分离与语义顺滑。",
+    );
+
+    companion object {
+        fun fromKey(key: String?): AsrEngine =
+            entries.firstOrNull { it.key == key } ?: SILICONFLOW_ALI
+    }
+}
+
+/**
  * IMA 知识库上传配置。
  *
  * 对应 https://ima.qq.com/agent-interface 申请的 OpenAPI 凭证：
@@ -70,7 +95,9 @@ enum class ImaUploadMode(
  * - [inspirationFolderId] / [inspirationFolderName]：灵感记录功能的目标文件夹，
  *   双击锁屏分段按钮进入灵感模式后，灵感期间的录音会保存并上传到此文件夹
  * - [uploadMode]：上传模式（纯音频 / 纯文稿 / 音频和文稿同时上传）
+ * - [asrEngine]：语音转写引擎（阿里 OpenAI 兼容 / 豆包流式语音识别 2.0）
  * - [asrEndpoint] / [asrApiKey] / [asrModel]：OpenAI 兼容语音转写接口配置（默认硅基流动免费 SenseVoiceSmall）
+ * - [doubaoWsUrl] / [doubaoResourceId] / [doubaoAppId] / [doubaoAccessToken]：豆包流式语音识别 2.0 配置
  */
 data class ImaConfig(
     val enabled: Boolean = false,
@@ -84,9 +111,14 @@ data class ImaConfig(
     val inspirationFolderId: String = "",
     val inspirationFolderName: String = "",
     val uploadMode: ImaUploadMode = ImaUploadMode.AUDIO_ONLY,
+    val asrEngine: AsrEngine = AsrEngine.SILICONFLOW_ALI,
     val asrEndpoint: String = DEFAULT_ASR_ENDPOINT,
     val asrApiKey: String = "",
     val asrModel: String = DEFAULT_ASR_MODEL,
+    val doubaoWsUrl: String = DEFAULT_DOUBAO_WS_URL,
+    val doubaoResourceId: String = DEFAULT_DOUBAO_RESOURCE_ID,
+    val doubaoAppId: String = "",
+    val doubaoAccessToken: String = "",
 ) {
     /** 判断配置是否完整，可发起一次上传。 */
     val isConfigured: Boolean
@@ -94,15 +126,23 @@ data class ImaConfig(
             apiKey.isNotBlank() &&
             knowledgeBaseId.isNotBlank()
 
-    /** 判断语音转写 API 配置是否完整。 */
+    /** 按当前所选引擎判断语音转写配置是否完整。 */
     val isAsrConfigured: Boolean
-        get() = asrEndpoint.isNotBlank() &&
-            asrApiKey.isNotBlank() &&
-            asrModel.isNotBlank()
+        get() = when (asrEngine) {
+            AsrEngine.SILICONFLOW_ALI -> asrEndpoint.isNotBlank() &&
+                asrApiKey.isNotBlank() &&
+                asrModel.isNotBlank()
+            AsrEngine.DOUBAO_SAUC_V2 -> doubaoWsUrl.isNotBlank() &&
+                doubaoResourceId.isNotBlank() &&
+                doubaoAppId.isNotBlank() &&
+                doubaoAccessToken.isNotBlank()
+        }
 
     companion object {
         const val DEFAULT_ASR_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
         const val DEFAULT_ASR_MODEL = "FunAudioLLM/SenseVoiceSmall"
+        const val DEFAULT_DOUBAO_WS_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream"
+        const val DEFAULT_DOUBAO_RESOURCE_ID = "volc.seedasr.sauc.duration"
     }
 }
 
@@ -258,11 +298,18 @@ class ImaSettings private constructor(context: Context) {
         inspirationFolderId = prefs.getString(KEY_INSPIRATION_FOLDER_ID, "").orEmpty(),
         inspirationFolderName = prefs.getString(KEY_INSPIRATION_FOLDER_NAME, "").orEmpty(),
         uploadMode = ImaUploadMode.fromKey(prefs.getString(KEY_UPLOAD_MODE, null)),
+        asrEngine = AsrEngine.fromKey(prefs.getString(KEY_ASR_ENGINE, null)),
         asrEndpoint = prefs.getString(KEY_ASR_ENDPOINT, null)?.takeIf { it.isNotBlank() }
             ?: ImaConfig.DEFAULT_ASR_ENDPOINT,
         asrApiKey = prefs.getString(KEY_ASR_API_KEY, "").orEmpty(),
         asrModel = prefs.getString(KEY_ASR_MODEL, null)?.takeIf { it.isNotBlank() }
             ?: ImaConfig.DEFAULT_ASR_MODEL,
+        doubaoWsUrl = prefs.getString(KEY_DOUBAO_WS_URL, null)?.takeIf { it.isNotBlank() }
+            ?: ImaConfig.DEFAULT_DOUBAO_WS_URL,
+        doubaoResourceId = prefs.getString(KEY_DOUBAO_RESOURCE_ID, null)?.takeIf { it.isNotBlank() }
+            ?: ImaConfig.DEFAULT_DOUBAO_RESOURCE_ID,
+        doubaoAppId = prefs.getString(KEY_DOUBAO_APP_ID, "").orEmpty(),
+        doubaoAccessToken = prefs.getString(KEY_DOUBAO_ACCESS_TOKEN, "").orEmpty(),
     )
 
     private fun save(config: ImaConfig) {
@@ -278,9 +325,14 @@ class ImaSettings private constructor(context: Context) {
             putString(KEY_INSPIRATION_FOLDER_ID, config.inspirationFolderId)
             putString(KEY_INSPIRATION_FOLDER_NAME, config.inspirationFolderName)
             putString(KEY_UPLOAD_MODE, config.uploadMode.key)
+            putString(KEY_ASR_ENGINE, config.asrEngine.key)
             putString(KEY_ASR_ENDPOINT, config.asrEndpoint)
             putString(KEY_ASR_API_KEY, config.asrApiKey)
             putString(KEY_ASR_MODEL, config.asrModel)
+            putString(KEY_DOUBAO_WS_URL, config.doubaoWsUrl)
+            putString(KEY_DOUBAO_RESOURCE_ID, config.doubaoResourceId)
+            putString(KEY_DOUBAO_APP_ID, config.doubaoAppId)
+            putString(KEY_DOUBAO_ACCESS_TOKEN, config.doubaoAccessToken)
             apply()
         }
     }
@@ -331,8 +383,13 @@ class ImaSettings private constructor(context: Context) {
         private const val KEY_INSPIRATION_FOLDER_ID = "inspiration_folder_id"
         private const val KEY_INSPIRATION_FOLDER_NAME = "inspiration_folder_name"
         private const val KEY_UPLOAD_MODE = "upload_mode"
+        private const val KEY_ASR_ENGINE = "asr_engine"
         private const val KEY_ASR_ENDPOINT = "asr_endpoint"
         private const val KEY_ASR_API_KEY = "asr_api_key"
         private const val KEY_ASR_MODEL = "asr_model"
+        private const val KEY_DOUBAO_WS_URL = "doubao_ws_url"
+        private const val KEY_DOUBAO_RESOURCE_ID = "doubao_resource_id"
+        private const val KEY_DOUBAO_APP_ID = "doubao_app_id"
+        private const val KEY_DOUBAO_ACCESS_TOKEN = "doubao_access_token"
     }
 }

@@ -14,10 +14,9 @@ import java.util.UUID
 class TranscriptionException(message: String) : Exception(message)
 
 /**
- * OpenAI 兼容语音转文字客户端（默认对接硅基流动免费的 FunAudioLLM/SenseVoiceSmall）。
- *
- * 使用标准 multipart/form-data 上传音频文件，零额外第三方依赖，
- * 支持 64KB 流式写入以避免长录音文件 OOM，并对瞬时网络异常提供指数退避重试。
+ * 语音转文字总入口，按 [ImaConfig.asrEngine] 分发：
+ * - [AsrEngine.SILICONFLOW_ALI]：OpenAI 兼容 multipart HTTP 接口（默认硅基流动 SenseVoiceSmall）
+ * - [AsrEngine.DOUBAO_SAUC_V2]：火山引擎豆包流式语音识别 2.0（本地 MediaCodec 解 PCM 直连 WSS）
  */
 object AudioTranscriber {
     private const val TAG = "AudioTranscriber"
@@ -25,7 +24,13 @@ object AudioTranscriber {
     private const val RETRY_BASE_MS = 2000L
     private const val BUFFER_SIZE = 64 * 1024
 
-    fun transcribe(file: File, config: ImaConfig): String {
+    fun transcribe(file: File, config: ImaConfig): String =
+        when (config.asrEngine) {
+            AsrEngine.SILICONFLOW_ALI -> transcribeOpenAiCompatible(file, config)
+            AsrEngine.DOUBAO_SAUC_V2 -> DoubaoAsrTranscriber.transcribe(file, config)
+        }
+
+    private fun transcribeOpenAiCompatible(file: File, config: ImaConfig): String {
         val endpoint = config.asrEndpoint.trim()
         val apiKey = config.asrApiKey.trim()
         val model = config.asrModel.trim()
