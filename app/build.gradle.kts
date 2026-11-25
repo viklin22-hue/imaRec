@@ -12,8 +12,8 @@ android {
         applicationId = "site.webbing.audiorec"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.1.3-transcript"
+        versionCode = 5
+        versionName = "0.1.4-doubao"
     }
 
     buildTypes {
@@ -50,6 +50,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     implementation(platform("androidx.compose:compose-bom:2025.06.01"))
     implementation("androidx.compose.ui:ui")
